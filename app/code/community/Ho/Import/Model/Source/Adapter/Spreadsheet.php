@@ -34,7 +34,7 @@ class Ho_Import_Model_Source_Adapter_Spreadsheet extends SpreadsheetReader
      */
     protected $_colNames = array();
 
-    public function __construct(array $config)
+    public function __construct($config)
     {
         $source = is_string($config) ? $config : $config['file'];
         if (!is_string($source)) {
@@ -54,8 +54,8 @@ class Ho_Import_Model_Source_Adapter_Spreadsheet extends SpreadsheetReader
         $this->_source = $source;
         parent::__construct($this->_source);
 
-        if ($config['has_headers'] && is_numeric($config['has_headers'])) {
-            $this->_hasHeaders = true;
+        if (isset($config['has_headers']) && is_numeric($config['has_headers'])) {
+            $this->_hasHeaders = (bool) $config['has_headers'];
             $this->rewind();
         }
 
@@ -69,6 +69,7 @@ class Ho_Import_Model_Source_Adapter_Spreadsheet extends SpreadsheetReader
         if ($this->_hasHeaders) {
             $current = $this->current();
             $this->_colNames = $current;
+            $this->next();
         }
     }
 
@@ -77,7 +78,17 @@ class Ho_Import_Model_Source_Adapter_Spreadsheet extends SpreadsheetReader
         if ($this->_hasHeaders && count($this->_colNames)) {
             $row = parent::current();
             foreach ($this->_colNames as $index => $key) {
-                $row[$key] = $row[$index];
+                if(!isset($row[$index])){
+                    if(isset($row[$key])){
+                        $row[$key] = $row[$key];
+                    }
+                    else{
+                        $row[$key] = null;
+                    }
+                }
+                else{
+                    $row[$key] = $row[$index];
+                }
                 unset($row[$index]);
             }
 

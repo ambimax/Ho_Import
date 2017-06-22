@@ -23,8 +23,9 @@
 
 /**
  * Class Ho_Import_Model_Import_Transport
- * @method $this setSkip(bool $skip)
+ * @method Ho_Import_Model_Import_Transport setSkip(bool $skip)
  * @method bool getSkip()
+ * @method Ho_Import_Model_Import_Transport setData()
  */
 class Ho_Import_Model_Import_Transport extends Varien_Object
 {
@@ -38,6 +39,33 @@ class Ho_Import_Model_Import_Transport extends Varien_Object
     public function setItems(array $items)
     {
         $this->_items = $items;
+        return $this;
+    }
+
+
+    /**
+     * @param array $items
+     *
+     * @return $this
+     */
+    public function addItems(array $items)
+    {
+        foreach ($items as $item)
+        {
+            $this->addItem($item);
+        }
+        return $this;
+    }
+
+
+    /**
+     * @param $item
+     *
+     * @return $this
+     */
+    public function addItem($item)
+    {
+        $this->_items[] = $item;
         return $this;
     }
 

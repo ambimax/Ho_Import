@@ -41,8 +41,8 @@ class Ho_Import_Model_Entity_Attribute_Backend_Profile
     {
         $data = $this->_getResource()->loadProfileData($object->getId(), $object->getEntityTypeId());
 
-        $object->setData($this->getAttribute()->getName(), $data);
-        $object->setOrigData($this->getAttribute()->getName(), $data);
+        $object->setData($this->getAttribute()->getName(), count($data) ? $data : null);
+        $object->setOrigData($this->getAttribute()->getName(), count($data) ? $data : null);
 
         return $this;
     }
@@ -55,12 +55,11 @@ class Ho_Import_Model_Entity_Attribute_Backend_Profile
      */
     public function afterSave($object)
     {
-//        var_dump($object);exit;
         $hasChanges = $object->dataHasChangedFor($this->getAttribute()->getName());
         if (! $hasChanges) {
             return $this;
         }
-        $data = $object->getData($this->getAttribute()->getName());
+        $object->getData($this->getAttribute()->getName());
 
         return $this;
     }

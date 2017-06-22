@@ -20,6 +20,12 @@
  */
 class Ho_Import_Model_Source_Adapter_Db extends Zend_Db_Table_Rowset
 {
+    protected $_db;
+
+    public function getDb()
+    {
+        return $this->_db;
+    }
 
     /**
      * Constructor.
@@ -28,25 +34,47 @@ class Ho_Import_Model_Source_Adapter_Db extends Zend_Db_Table_Rowset
     public function __construct(array $config)
     {
         $logHelper = Mage::helper('ho_import/log');
-        $model = $config['model'];
-        $query = $config['query'];
 
-        unset($config['model']);
+        $query = $config['query'];
         unset($config['query']);
 
-        /** @var Zend_Db_Adapter_Abstract $db */
-        $db = new $model($config);
+        if (isset($config['connection'])) {
+            $this->_db = Mage::getSingleton('core/resource')->getConnection($config['connection']);
+            unset($config['connection']);
+        } else {
+            $model = $config['model'];
+            unset($config['model']);
+
+            /** @var Zend_Db_Adapter_Abstract $db */
+            $this->_db = new $model($config);
+        }
+
+        // run after initialization statements
+        if (!empty($config['initStatements'])) {
+            $this->_db->query($config['initStatements']);
+        }
 
         if (isset($config['limit']) || isset($config['offset'])) {
             $limit  = (int) isset($config['limit']) ? $config['limit'] : 0;
             $offset = (int) isset($config['offset']) ? $config['offset'] : 0;
             $logHelper->log($logHelper->__('Setting limit to %s and offset to %s', $limit, $offset), Zend_Log::NOTICE);
-            $query = $db->limit($query, $config['limit'], $offset);
-            $logHelper->log($query, Zend_Log::DEBUG);
+            $query = $this->_db->limit($query, $config['limit'], $offset);
         }
 
+        // Replace variables in query
+        preg_match_all("/\{{(.*?)\}}/", $query, $matches);
+        foreach ($matches[0] as $key => $match) {
+            if (! isset($config[$matches[1][$key]])) {
+                throw new Exception(sprintf('Query parameter "%s" is required, add to shell command (-%s <value>)', $matches[1][$key], $matches[1][$key]));
+            }
+            $query = str_replace($match, '?', $query);
+            $query = $this->_db->quoteInto($query, explode(',', $config[$matches[1][$key]]));
+        }
+
+        $logHelper->log($query, Zend_Log::DEBUG);
+
         $logHelper->log('Fetching data...');
-        $result = $db->fetchAll($query);
+        $result = $this->_db->fetchAll($query);
         $logHelper->log('Done');
         $config['data'] = &$result;
 

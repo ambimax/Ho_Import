@@ -85,6 +85,8 @@ class Ho_Import_Model_Source_Adapter_Xml implements SeekableIterator
      */
     private $_chunkSize = 8192;
 
+    private $single_chunk = false;
+
     /**
      * From wehere to start reading
      * @var
@@ -443,7 +445,7 @@ class Ho_Import_Model_Source_Adapter_Xml implements SeekableIterator
         }
 
         $continue = $this->_readNextChunk();
-        while ($continue) {
+        do {
             $encodingPos = strpos($this->_chunk, 'encoding="');
             if ($encodingPos !== false) {
                 $encodingStr = substr($this->_chunk, $encodingPos + 10);
@@ -494,7 +496,7 @@ class Ho_Import_Model_Source_Adapter_Xml implements SeekableIterator
                     $this->_getRootNode();
                 }
             }
-        }
+        } while ($continue);
 
         if (isset($this->_customRootNode)) {
             Mage::throwException(Mage::helper('ho_import')->__(
@@ -510,6 +512,12 @@ class Ho_Import_Model_Source_Adapter_Xml implements SeekableIterator
     {
         $this->_chunk .= fread($this->_fileHandler, $this->_chunkSize);
         $this->_readBytes += $this->_chunkSize;
+
+        if ($this->_totalBytes <= $this->_chunkSize && !$this->single_chunk) {
+            $this->single_chunk = true;
+            return true;
+        }
+
         if ($this->_readBytes >= $this->_totalBytes) {
             $this->_readBytes = $this->_totalBytes;
             return false;

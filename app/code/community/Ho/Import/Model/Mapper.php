@@ -21,6 +21,7 @@
 class Ho_Import_Model_Mapper
 {
     const IMPORT_FIELD_CONFIG_PATH = 'global/ho_import/%s/fieldmap';
+    const ENTITY_TYPE_CONFIG_PATH = 'global/ho_import/%s/entity_type';
 
     /**
      * The fieldmap config for the current profile
@@ -39,6 +40,8 @@ class Ho_Import_Model_Mapper
 
     /** @var bool|string */
     protected $_symbolIgnoreFields = false;
+
+    protected $_importer = null;
 
 
     /**
@@ -129,6 +132,22 @@ class Ho_Import_Model_Mapper
         return $this;
     }
 
+    public function setImporter(Ho_Import_Model_Import $importer)
+    {
+        $this->_importer = $importer;
+        return $this;
+    }
+
+
+    /**
+     * Get the item, which is the xml-config array
+     * @return Ho_Import_Model_Import
+     */
+    public function getImporter()
+    {
+        return $this->_importer;
+    }
+
     /**
      * Get the value for a specific fieldConfig
      *
@@ -152,7 +171,7 @@ class Ho_Import_Model_Mapper
         //iffieldvalue
         if (isset($attributes['iffieldvalue'])) {
             $field = $attributes['iffieldvalue'];
-            if (! isset($item[$field]) || empty($item[$field])) {
+            if (! isset($item[$field]) || (empty($item[$field]) && !is_numeric($item[$field]))) {
                 return isset($attributes['ignoreifempty']) ? $this->_symbolIgnoreFields : null;
             }
         }
@@ -160,7 +179,7 @@ class Ho_Import_Model_Mapper
         //unlessfieldvalue
         if (isset($attributes['unlessfieldvalue'])) {
             $field = $attributes['unlessfieldvalue'];
-            if (isset($item[$field]) && !empty($item[$field])) {
+            if (isset($item[$field]) && (!empty($item[$field]) || is_numeric($item[$field]))) {
                 return isset($attributes['ignoreifempty']) ? $this->_symbolIgnoreFields : null;
             }
         }
@@ -173,8 +192,6 @@ class Ho_Import_Model_Mapper
         // helper: get field value with a helper
         if (isset($attributes['helper'])) {
             //get the helper and method
-            //@todo add helper caching, usually there are about 3-4 helpers in total, which makes it
-            //a bit unnecessary to load them each time.
             $helperParts = explode('::', $attributes['helper']);
             $helper = Mage::helper($helperParts[0]);
             $method = $helperParts[1];
@@ -235,33 +252,46 @@ class Ho_Import_Model_Mapper
         }
 
         // defaultvalue
-        if (isset($attributes['defaultvalue']) && empty($result)) {
+        if (isset($attributes['defaultvalue']) && (empty($result) && !is_numeric($result))) {
             $result = $attributes['defaultvalue'];
         }
 
         //ignoreifempty
-        if (isset($attributes['ignoreifempty']) && empty($result)) {
+        if (isset($attributes['ignoreifempty']) && (empty($result) && !is_numeric($result))) {
             $result = $this->_symbolIgnoreFields;
         }
 
-        return is_array($result) ? array_values($result) : $result;
+        if (is_array($result)) {
+            array_walk_recursive($result, function(&$value) {
+                $value = rtrim($value, '\\"');
+            });
+            return array_values($result);
+        } else {
+            return rtrim($result, '\\"');
+        }
     }
-
 
     /**
      * Get the config for a specific field or the config for all the fields.
-     * @param null $fieldName
-     * @param null $profile
+     *
+     * @param null   $fieldName
+     * @param null   $profile
+     *
+     * @param string $configPath
      *
      * @return mixed
+     * @throws Mage_Core_Exception
      */
-    public function getFieldConfig($fieldName = null, $profile = null)
-    {
+    public function getFieldConfig(
+        $fieldName  = null,
+        $profile    = null,
+        $configPath = self::IMPORT_FIELD_CONFIG_PATH
+    ) {
         if (is_null($profile)) {
             $profile = $this->getProfileName();
         }
 
-        $fieldMapPath = sprintf(self::IMPORT_FIELD_CONFIG_PATH, $profile);
+        $fieldMapPath = sprintf($configPath, $profile);
 
         if (! isset($this->_fieldConfig[$fieldMapPath])) {
             $fieldMapNode = Mage::getConfig()->getNode($fieldMapPath);
@@ -271,11 +301,18 @@ class Ho_Import_Model_Mapper
 
             if ($usePath = $fieldMapNode->getAttribute('use')) {
                 $fieldMapPath = sprintf(self::IMPORT_FIELD_CONFIG_PATH, $usePath);
-                $fieldMapNode = Mage::getConfig()->getNode($fieldMapPath);
+                $useFieldMapNode = Mage::getConfig()->getNode($fieldMapPath);
 
-                if (! $fieldMapNode) {
+                if (! $useFieldMapNode) {
                     Mage::throwException(sprintf("Incorrect 'use' in <fieldmap use=\"%s\" />", $usePath));
                 }
+            }
+            
+            // If the user has specified a "use" attribute then we will merge the two XML trees
+            // Only merge if both tress have children.
+            if (isset($useFieldMapNode) && $useFieldMapNode->count()>0 && $fieldMapNode->count()>0) {
+                $useFieldMapNode->extend($fieldMapNode, true);
+                $fieldMapNode = $useFieldMapNode;
             }
 
             $columns = $fieldMapNode->children();
@@ -337,6 +374,15 @@ class Ho_Import_Model_Mapper
         foreach ($columns as $columnName => $columnData) {
             $columnNames[$columnName] = '';
         }
+
+        $entityType = (string) Mage::getConfig()->getNode(sprintf(self::ENTITY_TYPE_CONFIG_PATH, $profile));
+        if ($entityType == 'catalog_product') {
+            $columnNames['_super_products_sku'] = '';
+            $columnNames['_super_attribute_code'] = '';
+            $columnNames['_super_attribute_option'] = '';
+            $columnNames['_super_attribute_price_corr'] = '';
+        }
+
         return $columnNames;
     }
 }

@@ -26,7 +26,7 @@
 <config>
 	<modules>
 		<Ho_Import>
-			<version>1.6.0</version>
+			<version>1.7.1</version>
 		</Ho_Import>
 	</modules>
 	<global>
@@ -40,11 +40,11 @@
 				<class>Ho_Import_Helper</class>
 			</ho_import>
 		</helpers>
-		<models>
-			<ho_import>
-				<class>Ho_Import_Model</class>
+        <models>
+            <ho_import>
+                <class>Ho_Import_Model</class>
                 <resourceModel>ho_import_resource</resourceModel>
-			</ho_import>
+            </ho_import>
             <ho_import_resource>
                 <class>Ho_Import_Model_Resource</class>
                 <entities>
@@ -53,7 +53,12 @@
                     </entity>
                 </entities>
             </ho_import_resource>
-		</models>
+            <importexport_resource>
+                <rewrite>
+                    <import_data>Ho_Import_Model_ImportExport_Resource_Import_Data</import_data>
+                </rewrite>
+            </importexport_resource>
+        </models>
         <resources>
             <ho_import_setup>
                 <setup>
@@ -91,6 +96,15 @@
                     </ho_import>
                 </observers>
             </catalog_product_import_finish_before>
+            <catalog_category_import_finish_before>
+                <observers>
+                    <ho_import>
+                        <type>singleton</type>
+                        <class>ho_import/observer</class>
+                        <method>linkCategoriesToProfile</method>
+                    </ho_import>
+                </observers>
+            </catalog_category_import_finish_before>
             <fastsimpleimport_reindex_products_before>
                 <observers>
                     <ho_import>
@@ -201,40 +215,58 @@
             </fastsimpleimport_reindex_products_delete_after>
             <fastsimpleimport_reindex_category_before_flat>
                 <observers>
-                    <ho_import_fastsimpleimport_reindex_category_before_flat>
+                    <ho_import>
                         <type>singleton</type>
                         <class>Ho_Import_Model_Observer</class>
                         <method>progressLog</method>
-                    </ho_import_fastsimpleimport_reindex_category_before_flat>
+                    </ho_import>
                 </observers>
             </fastsimpleimport_reindex_category_before_flat>
             <fastsimpleimport_reindex_category_before_ecomdev_urlrewrite>
                 <observers>
-                    <ho_import_fastsimpleimport_reindex_category_before_ecomdev_urlrewrite>
+                    <ho_import>
                         <type>singleton</type>
                         <class>Ho_Import_Model_Observer</class>
                         <method>progressLog</method>
-                    </ho_import_fastsimpleimport_reindex_category_before_ecomdev_urlrewrite>
+                    </ho_import>
                 </observers>
             </fastsimpleimport_reindex_category_before_ecomdev_urlrewrite>
             <fastsimpleimport_reindex_category_before_urlrewrite>
                 <observers>
-                    <ho_import_fastsimpleimport_reindex_category_before_urlrewrite>
+                    <ho_import>
                         <type>singleton</type>
                         <class>Ho_Import_Model_Observer</class>
                         <method>progressLog</method>
-                    </ho_import_fastsimpleimport_reindex_category_before_urlrewrite>
+                    </ho_import>
                 </observers>
             </fastsimpleimport_reindex_category_before_urlrewrite>
             <fastsimpleimport_reindex_category_after>
                 <observers>
-                    <ho_import_fastsimpleimport_reindex_category_after>
+                    <ho_import>
                         <type>singleton</type>
                         <class>Ho_Import_Model_Observer</class>
                         <method>progressLog</method>
-                    </ho_import_fastsimpleimport_reindex_category_after>
+                    </ho_import>
                 </observers>
             </fastsimpleimport_reindex_category_after>
+            <fastsimpleimport_reindex_category_enterprise_before>
+                <observers>
+                    <ho_import>
+                        <type>singleton</type>
+                        <class>Ho_Import_Model_Observer</class>
+                        <method>progressLog</method>
+                    </ho_import>
+                </observers>
+            </fastsimpleimport_reindex_category_enterprise_before>
+            <fastsimpleimport_reindex_product_enterprise_before>
+                <observers>
+                    <ho_import>
+                        <type>singleton</type>
+                        <class>Ho_Import_Model_Observer</class>
+                        <method>progressLog</method>
+                    </ho_import>
+                </observers>
+            </fastsimpleimport_reindex_product_enterprise_before>
 		</events>
 	</global>
 	<frontend>

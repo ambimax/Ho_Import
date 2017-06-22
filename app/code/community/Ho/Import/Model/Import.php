@@ -47,6 +47,7 @@ class Ho_Import_Model_Import extends Varien_Object
     const IMPORT_CONFIG_IMPORT_OPTIONS = 'global/ho_import/%s/import_options';
     const IMPORT_CONFIG_CLEAN          = 'global/ho_import/%s/clean';
     const IMPORT_CONFIG_LOG_LEVEL      = 'global/ho_import/%s/log_level';
+    const IMPORT_CONFIG_MEMORY_LIMIT   = 'global/ho_import/%s/memory_limit';
 
     /**
      * @var AvS_FastSimpleImport_Model_Import
@@ -56,7 +57,6 @@ class Ho_Import_Model_Import extends Varien_Object
     protected function _construct()
     {
         parent::_construct();
-        ini_set('memory_limit', '2048M');
         $this->_fastSimpleImport = Mage::getModel('fastsimpleimport/import');
     }
 
@@ -66,20 +66,22 @@ class Ho_Import_Model_Import extends Varien_Object
      */
     public function process()
     {
+        $logger = $this->_getLog();
         if ($level = $this->getLogLevel()) {
             $this->_getLog()->setMinLogLevel($level);
         }
 
+        ini_set('memory_limit', $this->getMemoryLimit());
+
         if (!array_key_exists($this->getProfile(), $this->getProfiles())) {
-            Mage::throwException($this->_getLog()->__("Profile %s not found", $this->getProfile()));
+            Mage::throwException($logger->__("Profile %s not found", $this->getProfile()));
         }
 
         $this->_applyImportOptions();
         $this->_downloader();
         $this->_decompressor();
 
-        $this->_getLog()->log($this->_getLog()->__(
-                'Mapping source fields and saving to temp csv file (%s)', $this->_getFileName()));
+        $logger->log($logger->__('Mapping source fields and saving to temp csv file (%s)', $this->_getFileName()));
 
         $this->_archiveOldCsv();
         $hasRows = $this->_createImportCsv();
@@ -90,12 +92,12 @@ class Ho_Import_Model_Import extends Varien_Object
 
         $importData = $this->getImportData();
         if (isset($importData['dryrun']) && $importData['dryrun'] == 1) {
-            $this->_getLog()->log($this->_getLog()->__(
+            $logger->log($logger->__(
                 'Dry run %s rows from temp csv file (%s)', $this->getRowCount(), $this->_getFileName()));
 
             $errors = $this->_dryRun();
         } else {
-            $this->_getLog()->log($this->_getLog()->__(
+            $logger->log($logger->__(
                 'Processing %s rows from temp csv file (%s)', $this->getRowCount(), $this->_getFileName()));
 
             $errors = $this->_importMain();
@@ -109,17 +111,32 @@ class Ho_Import_Model_Import extends Varien_Object
 
         if ($cleanRowCount) {
             if (isset($importData['dryrun']) && $importData['dryrun'] == 1) {
-                $this->_getLog()->log($this->_getLog()->__(
+                $logger->log($logger->__(
                     'Dry run cleaning %s rows from temp csv file (%s)', $cleanRowCount, $this->_getCleanFileName()));
                 $errors = $this->_dryRunEntityCleanCsv();
             } else {
-                $this->_getLog()->log($this->_getLog()->__(
+                $logger->log($logger->__(
                     'Clean %s rows from temp csv file (%s)', $cleanRowCount, $this->_getCleanFileName()));
                 $errors = $this->_processEntityCleanCsv();
             }
 
             $this->_logErrors($errors);
             $this->_debugErrors($errors);
+        }
+
+        if (!is_null($this->_sourceFile) && !is_null($this->_sourceProcessedPath)) {
+            if (!file_exists($this->_sourceProcessedPath)) {
+                $this->_sourceProcessedPath = Mage::getBaseDir() . DS . (string) $this->_sourceProcessedPath;
+            }
+            if (is_dir_writeable($this->_sourceProcessedPath)) {
+                if (!rename($this->_sourceFile, $this->_sourceProcessedPath . DS . basename($this->_sourceFile))) {
+                    $logger->log($logger->__('Failed to move source file (%s) to archive directory (%s)',
+                        $this->_sourceFile, $this->_sourceProcessedPath), Zend_Log::WARN);
+                }
+            } else {
+                $logger->log($logger->__('Failed to move source file, archive directory (%s) non-existant or not writable',
+                    $this->_sourceProcessedPath), Zend_Log::WARN);
+            }
         }
 
         $this->_getLog()->log($this->_getLog()->__('Clean entity link table'));
@@ -241,7 +258,15 @@ class Ho_Import_Model_Import extends Varien_Object
                 foreach ($transport->getItems() as $preparedItem) {
                     $results = $this->_fieldMapItem($preparedItem);
 
-                    foreach ($results as $result) {
+                    $transportData = $transport->getData();
+                    $transport = $this->_getTransport()
+                        ->setItems($results)
+                        ->setData($transportData);
+
+                    $this->_runEvent('source_row_fieldmap_after', $transport);
+                    $this->_configurableExtractRow($transport, $preparedItem);
+
+                    foreach ($transport->getItems() as $result) {
                         $i++;
 
                         $entities[]                    = $result;
@@ -405,9 +430,15 @@ class Ho_Import_Model_Import extends Varien_Object
                 continue;
             }
             foreach ($transport->getItems() as $preparedItem) {
-                $result = $this->_fieldMapItem($preparedItem);
-                $transport = $this->_getTransport()->setItems($result);
+                $results = $this->_fieldMapItem($preparedItem);
+
+                $transportData = $transport->getData();
+                $transport = $this->_getTransport()
+                    ->setItems($results)
+                    ->setData($transportData);
+
                 $this->_runEvent('source_row_fieldmap_after', $transport);
+                $this->_configurableExtractRow($transport, $preparedItem);
                 foreach ($transport->getItems() as $row) {
                     $rowCount++;
                     $exportAdapter->writeRow(array_merge($fieldNames, $row));
@@ -417,12 +448,14 @@ class Ho_Import_Model_Import extends Varien_Object
         }
         $transport = $this->_getTransport();
         $this->_runEvent('source_fieldmap_after', $transport);
+        $this->_configurableGetConfigurables($transport);
         if ($transport->getItems()) {
             foreach ($transport->getItems() as $item) {
                 $rowCount++;
                 $exportAdapter->writeRow(array_merge($fieldNames, $item));
             }
         }
+
         $this->setRowCount($rowCount);
         $this->setEntityCount($entityCount);
         $seconds       = round(microtime(true) - $timer, 2);
@@ -549,22 +582,33 @@ class Ho_Import_Model_Import extends Varien_Object
      */
     protected function _fieldMapItem(&$item)
     {
-        $itemRows = array();
-
         $mapper = $this->_getMapper();
         $mapper->setSymbolIgnoreFields($this->_fastSimpleImport->getSymbolIgnoreFields());
         $mapper->setItem($item);
+        $fieldConfig = $this->_getMapper()->getFieldConfig();
+        $itemRows    = $this->_fieldMapItemExtract($fieldConfig);
+        return $this->_fieldMapItemFlatten($itemRows, $fieldConfig);
+    }
+
+    /**
+     * @param $item
+     * @param $fieldConfig
+     *
+     * @return array
+     */
+    protected function _fieldMapItemExtract($fieldConfig)
+    {
+        $itemRows = array();
+
+        $mapper = $this->_getMapper();
         $symbolForClearField = $this->_fastSimpleImport->getSymbolEmptyFields();
-        $profile = $this->getProfile();
 
-
-        $allFieldConfig = $mapper->getFieldConfig();
         //Step 1: Get the values for the fields
-        foreach ($allFieldConfig as $storeCode => $fields) {
+        foreach ($fieldConfig as $storeCode => $fields) {
             $mapper->setStoreCode($storeCode);
             /** @var $column Mage_Core_Model_Config_Element */
             foreach ($fields as $fieldName => $fieldConfig) {
-                $result = $this->_getMapper()->map($fieldName, $storeCode);
+                $result = $this->_getMapper()->mapItem($fieldConfig);
 
                 //add the values to the itemRows
                 if (is_array($result)) {
@@ -584,13 +628,24 @@ class Ho_Import_Model_Import extends Varien_Object
                 }
             }
         }
+        return $itemRows;
+    }
+
+
+    /**
+     * @param $itemRows
+     * @param $fieldConfig
+     */
+    protected function _fieldMapItemFlatten(&$itemRows, $fieldConfig)
+    {
+        $profile = $this->getProfile();
 
         //Step 2: Flatten all the rows.
         $flattenedRows = array();
         foreach ($itemRows as $store => $storeData) {
             foreach ($storeData as $storeKey => $storeRow) {
                 $flatRow = array();
-                foreach ($allFieldConfig[$store] as $key => $column) {
+                foreach ($fieldConfig[$store] as $key => $column) {
                     if (isset($storeRow[$key]) && (strlen($storeRow[$key]))) {
                         $flatRow[$key] = (string)$storeRow[$key];
                     }
@@ -602,13 +657,15 @@ class Ho_Import_Model_Import extends Varien_Object
 
                 if ($flatRow) {
                     //if a column is required we add it here.
-                    foreach ($allFieldConfig[$store] as $key => $column) {
+                    foreach ($fieldConfig[$store] as $key => $column) {
                         if (!isset($flatRow[$key]) && isset($column['@']) && isset($column['@']['required'])) {
                             $flatRow[$key] = '';
                         }
                     }
 
-                    $flatRow['_store'] = $store == 'admin' ? '' : $store;
+                    if ($this->_getEntityType() != 'customer') {
+                        $flatRow['_store'] = $store == 'admin' ? '' : $store;
+                    }
                     $flattenedRows[]   = $flatRow;
                 }
             }
@@ -626,7 +683,7 @@ class Ho_Import_Model_Import extends Varien_Object
      */
     protected function _getMapper()
     {
-        return Mage::getSingleton('ho_import/mapper');
+        return Mage::getSingleton('ho_import/mapper')->setImporter($this);
     }
 
 
@@ -736,9 +793,16 @@ class Ho_Import_Model_Import extends Varien_Object
     /**
      * @return SeekableIterator
      */
+    protected $_sourceAdapter = null;
+    protected $_sourceFile = null;
+    protected $_sourceProcessedPath = null;
     public function getSourceAdapter()
     {
         $source = $this->_getConfigNode(self::IMPORT_CONFIG_MODEL);
+
+        if ($this->_sourceAdapter !== null) {
+            return $this->_sourceAdapter;
+        }
 
         if (!$source) {
             Mage::throwException($this->_getLog()->__('<source> not found for profile %s', $this->getProfile()));
@@ -762,15 +826,36 @@ class Ho_Import_Model_Import extends Varien_Object
             }
         }
 
-        if (isset($arguments['file']) && !is_readable($arguments['file'])) {
+        if (isset($arguments['glob'])) {
+            /** @noinspection PhpUndefinedFieldInspection */
+            $files = glob(Mage::getBaseDir() . DS . (string) $source->glob, GLOB_BRACE);
+
+            if (!is_array($files) || !count($files)) {
+                /** @noinspection PhpUndefinedFieldInspection */
+                Mage::throwException(Mage::helper('importexport')->__(
+                    "The glob \"%s\" does not match any files", $source->glob));
+            }
+            sort($files);
+
+            $arguments['file'] = array_shift($files);
+        } elseif (isset($arguments['file']) && !is_readable($arguments['file'])) {
 
             /** @noinspection PhpUndefinedFieldInspection */
-            $arguments['file'] = Mage::getBaseDir() . DS . (string)$source->file;
+            $arguments['file'] = Mage::getBaseDir() . DS . (string) $source->file;
+        }
+
+        if (isset($arguments['file'])) {
             if (!is_readable($arguments['file'])) {
 
                 /** @noinspection PhpUndefinedFieldInspection */
                 Mage::throwException(Mage::helper('importexport')->__(
-                        "%s file does not exists or is not readable", $source->file));
+                    "%s file does not exists or is not readable", $source->file));
+            }
+
+            $this->_sourceFile = $arguments['file'];
+
+            if (isset($arguments['archive_path'])) {
+                $this->_sourceProcessedPath = $arguments['archive_path'];
             }
         }
 
@@ -778,17 +863,22 @@ class Ho_Import_Model_Import extends Varien_Object
             $arguments = $arguments['file'];
         }
 
+        $this->_runEvent('source_adapter_before', $this->getProfile());
         $this->_getLog()->log($this->_getLog()->__('Getting source adapter %s', $source->getAttribute('model')));
-        $importModel = Mage::getModel($source->getAttribute('model'), $arguments);
+        $importData = $this->getImportData();
+        if (is_array($arguments)) {
+            $arguments = array_merge($arguments, is_null($importData) ? [] : $importData);
+        }
+        $this->_sourceAdapter = Mage::getModel($source->getAttribute('model'), $arguments);
 
-        if (!$importModel) {
+        if (!$this->_sourceAdapter) {
             Mage::throwException($this->_getLog()->__(
                 'Import model (%s) not found for profile %s',
                 $source->getAttribute('model'), $this->getProfile()
             ));
         }
 
-        return $importModel;
+        return $this->_sourceAdapter;
     }
 
     /**
@@ -818,6 +908,17 @@ class Ho_Import_Model_Import extends Varien_Object
             return $level;
         }
         return Ho_Import_Helper_Log::LOG_SUCCESS;
+    }
+
+    /**
+     * @return string
+     */
+    protected function getMemoryLimit()
+    {
+        if ($limit = $this->_getConfigNode(self::IMPORT_CONFIG_MEMORY_LIMIT)) {
+            return $limit;
+        }
+        return '2048M';
     }
 
     /**
@@ -918,7 +1019,7 @@ class Ho_Import_Model_Import extends Varien_Object
      */
     protected function _archiveOldCsv()
     {
-        $allowArchive = (bool) $this->_getConfigNode(self::IMPORT_CONFIG_IMPORT_OPTIONS.'/archive_import_files');
+        $allowArchive = (bool) ((string)$this->_getConfigNode(self::IMPORT_CONFIG_IMPORT_OPTIONS.'/archive_import_files'));
 
         $fileName = $this->_getFileName();
         if (!$allowArchive || !file_exists($fileName)) {
@@ -957,42 +1058,30 @@ class Ho_Import_Model_Import extends Varien_Object
         /** @var Magento_Db_Adapter_Pdo_Mysql $adapter */
         $adapter = $resource->getConnection('write');
 
-        /** @var Mage_Eav_Model_Entity_Type $entityType */
-        $cleanMode = $this->_getCleanMode();
-
         $select = $this->_getCleanSelect();
         if (! $select) {
             return 0;
         }
-        $skus = $adapter->fetchCol($select);
+        $entities = $adapter->fetchAll($select);
 
         /** @var Mage_ImportExport_Model_Export_Adapter_Abstract $exportAdapter */
         $exportAdapter = Mage::getModel('importexport/export_adapter_csv', $this->_getCleanFileName());
 
         $rowCount = 0;
-        foreach ($skus as $sku) {
+        foreach ($entities as $entity) {
             $rowCount++;
-
-            $rowData = array('sku' => $sku);
-            switch($cleanMode) {
-                case 'hide':
-                    $rowData['visibility'] = Mage_Catalog_Model_Product_Visibility::VISIBILITY_NOT_VISIBLE;
-                    break;
-
-                case 'disable':
-                    $rowData['status'] = Mage_Catalog_Model_Product_Status::STATUS_DISABLED;
-                    break;
-
-                case 'delete':
-                    break;
+            switch ($this->_getEntityType()) {
+                case 'catalog_category':
+                    $parts = explode('/', $entity['_root']);
+                    $entity['_root'] = $parts[1];
             }
-            $exportAdapter->writeRow($rowData);
+            $exportAdapter->writeRow($entity);
         }
 
         if ($rowCount) {
             $this->_getLog()->log($this->_getLog()->__(
                 'Prepared cleaning of %s entities with mode %s',
-                $rowCount, $cleanMode
+                $rowCount, $this->_getCleanMode()
             ));
         }
 
@@ -1013,6 +1102,7 @@ class Ho_Import_Model_Import extends Varien_Object
 
         /** @var Magento_Db_Adapter_Pdo_Mysql $adapter */
         $adapter = $resource->getConnection('write');
+        $cleanMode = $this->_getCleanMode();
         $select = $adapter
             ->select()
             ->from(
@@ -1028,7 +1118,31 @@ class Ho_Import_Model_Import extends Varien_Object
 
         switch ($this->_getEntityType()) {
             case 'catalog_category':
-                Mage::throwException('Cleaning categories not yet implemented');
+                $select->join(
+                    array('entity' => $resource->getTableName('catalog/category')),
+                    'entity.entity_id = entity_profile.entity_id',
+                    array('_category' => 'entity.entity_id', '_root' => 'entity.path')
+                );
+
+                switch($cleanMode) {
+                    case 'hide':
+                        $this->_getLog()->log('Hiding categories is not yet implemented yet, skipping.');
+                        return false;
+
+                        $notVisible = Mage::helper('catalog')->__('No');
+                        $select->columns(['include_in_menu' => new Zend_Db_Expr("'$notVisible'")]);
+                        $select->columns(['m_show_in_layered_navigation' => new Zend_Db_Expr("'$notVisible'")]);
+                        break;
+
+                    case 'disable':
+                        $this->_getLog()->log('Disabling categories is not yet implemented yet, skipping.');
+                        return false;
+
+                        $disabled = Mage::helper('catalog')->__('No');
+                        $select->columns(['is_active' => new Zend_Db_Expr("'$disabled'")]);
+                        break;
+                }
+
                 break;
             case 'catalog_product':
                 $select->join(
@@ -1036,6 +1150,19 @@ class Ho_Import_Model_Import extends Varien_Object
                     'entity.entity_id = entity_profile.entity_id',
                     array('sku')
                 );
+
+                switch($cleanMode) {
+                    case 'hide':
+                        $notVisible = Mage_Catalog_Model_Product_Visibility::VISIBILITY_NOT_VISIBLE;
+                        $select->columns(['visibility' => new Zend_Db_Expr("'$notVisible'")]);
+                        break;
+
+                    case 'disable':
+                        $disabled = Mage_Catalog_Model_Product_Status::STATUS_DISABLED;
+                        $select->columns(['status' => new Zend_Db_Expr("'$disabled'")]);
+                        break;
+                }
+
                 break;
             case 'customer':
                 $this->_getLog()->log('Cleaning customers not yet implemented, skipping.');
@@ -1079,6 +1206,14 @@ class Ho_Import_Model_Import extends Varien_Object
      */
     protected function _cleanEntityLinkTable()
     {
+        /**
+         * Skip this procedure if entity type is catalog_category_product.
+         * Magento does not recognise such type(\Ho_Import_Model_Import::_getEntityTypeId() fails) neither needed in this method at all.
+         */
+        if ($this->_getEntityType() == self::IMPORT_TYPE_CATEGORY_PRODUCT) {
+            return;
+        }
+
         $resource = Mage::getSingleton('core/resource');
 
         /** @var Magento_Db_Adapter_Pdo_Mysql $adapter */
@@ -1095,7 +1230,10 @@ class Ho_Import_Model_Import extends Varien_Object
 
         switch ($this->_getEntityType()) {
             case 'catalog_category':
-                $this->_getLog()->log('Cleaning category entities not yet implemented', Zend_Log::WARN);
+                $select->joinLeft(
+                    array('entity' => $resource->getTableName('catalog/category')),
+                    'entity.entity_id = entity_profile.entity_id'
+                );
                 break;
             case 'catalog_product':
                 $select->joinLeft(
@@ -1105,9 +1243,188 @@ class Ho_Import_Model_Import extends Varien_Object
                 break;
             case 'customer':
                 $this->_getLog()->log('Cleaning customer entities not yet implemented', Zend_Log::WARN);
+                return;
                 break;
         }
 
-        $adapter->deleteFromSelect($select, 'entity_profile');
+        $resource->getConnection('core_write')->query($adapter->deleteFromSelect($select, 'entity_profile'));
+    }
+
+
+    const IMPORT_CONFIG_CB = 'global/ho_import/%s/configurable_builder';
+    const IMPORT_CONFIG_CB_SKU = 'global/ho_import/%s/configurable_builder/sku';
+    const IMPORT_CONFIG_CB_ATTRIBUTES = 'global/ho_import/%s/configurable_builder/attributes';
+    const IMPORT_CONFIG_CB_FIELDMAP = 'global/ho_import/%s/configurable_builder/fieldmap';
+    const IMPORT_CONFIG_CB_CALCULATE_PRICE = 'global/ho_import/%s/configurable_builder/calculate_price';
+    const IMPORT_CONFIG_CB_CALCULATE_PRICE_IN_STOCK = 'global/ho_import/%s/configurable_builder/calculate_price_in_stock';
+
+    protected $_configurables = [];
+
+    protected function _configurableInitProduct($sku, &$preparedItem)
+    {
+        $mapper = $this->_getMapper();
+        $mapper->setSymbolIgnoreFields($this->_fastSimpleImport->getSymbolIgnoreFields());
+        $mapper->setItem($preparedItem);
+        $this->_configurables[$sku] = $this->_fieldMapItemExtract($this->_configurableFieldConfig());
+
+        $calculatePrice = (bool) $this->_getConfigNode(self::IMPORT_CONFIG_CB_CALCULATE_PRICE);
+        if ($calculatePrice) {
+            $this->_configurables[$sku]['admin'][0]['_instock_price'] = PHP_INT_MAX;
+            $this->_configurables[$sku]['admin'][0]['_allprod_price'] = PHP_INT_MAX;
+            $this->_configurables[$sku]['admin'][0]['_instock_special_price'] = PHP_INT_MAX;
+            $this->_configurables[$sku]['admin'][0]['_allprod_special_price'] = PHP_INT_MAX;
+        }
+
+        return $this;
+    }
+
+
+    protected function _configurableExtractRow(Ho_Import_Model_Import_Transport $transport, &$preparedItem)
+    {
+        if (! $this->_getConfigNode(self::IMPORT_CONFIG_CB)) {
+            return $this;
+        }
+
+        if ($this->_getEntityType() != self::IMPORT_TYPE_PRODUCT) {
+            return $this;
+        }
+
+        $configurableSku = $this->_getConfigNode(self::IMPORT_CONFIG_CB_SKU);
+        $calculatePrice = (bool) $this->_getConfigNode(self::IMPORT_CONFIG_CB_CALCULATE_PRICE);
+        $calculatePriceInStock = (bool) $this->_getConfigNode(self::IMPORT_CONFIG_CB_CALCULATE_PRICE_IN_STOCK);
+        $sku = $this->_getMapper()->mapItem($configurableSku);
+        if (! $sku) {
+            return $this;
+        }
+
+        // Force array if single attribute is given with the 'value' parameter.
+        $configurableAttributes = (array) $this->_getMapper()->mapItem(
+            $this->_getConfigNode(self::IMPORT_CONFIG_CB_ATTRIBUTES)
+        );
+
+        if (! isset($this->_configurables[$sku])) {
+            $this->_configurableInitProduct($sku, $preparedItem);
+        }
+
+        $rowNum = 0;
+        foreach ($this->_configurables[$sku]['admin'] as $row) {
+            if (isset($row['_super_products_sku'])) {
+                $rowNum++;
+            }
+        }
+
+        foreach ($transport->getItems() as $item) {
+            if (! isset($item['sku']) || isset($item['_custom_option_sku'])) {
+                continue;
+            }
+
+            $price = (float) $item['price'];
+            $specialPrice = (float) (isset($item['special_price']) ? $item['special_price'] : 0);
+
+            //lowest instock price
+            if ($price && $calculatePrice
+                && (!$calculatePriceInStock || $item['is_in_stock'])
+                && $price < $this->_configurables[$sku]['admin'][0]['_instock_price']) {
+                $this->_configurables[$sku]['admin'][0]['_instock_price'] = $price;
+            }
+
+            //lowest instock special_price
+            if ($specialPrice > 0 && $calculatePrice
+                && (!$calculatePriceInStock || $item['is_in_stock'])
+                && $specialPrice < $this->_configurables[$sku]['admin'][0]['_instock_special_price']) {
+                $this->_configurables[$sku]['admin'][0]['_instock_special_price'] = $specialPrice;
+            }
+
+            //lowest allprod price
+            if ($price && $calculatePrice
+                && $price < $this->_configurables[$sku]['admin'][0]['_allprod_price']) {
+                $this->_configurables[$sku]['admin'][0]['_allprod_price'] = $price;
+            }
+
+            //lowest allprod special_price
+            if ($specialPrice > 0 && $calculatePrice
+                && $specialPrice < $this->_configurables[$sku]['admin'][0]['_allprod_price']) {
+                $this->_configurables[$sku]['admin'][0]['_allprod_special_price'] = $specialPrice;
+            }
+
+            foreach ($configurableAttributes as $attribute) {
+                $this->_configurables[$sku]['admin'][$rowNum]['_super_products_sku'] = $item['sku'];
+                $this->_configurables[$sku]['admin'][$rowNum]['_super_attribute_code'] = $attribute;
+                $this->_configurables[$sku]['admin'][$rowNum]['_super_attribute_option'] = $item[$attribute];
+                $this->_configurables[$sku]['admin'][$rowNum]['_super_attribute_price_corr'] = null;
+                $this->_configurables[$sku]['admin'][$rowNum]['_super_attribute_final_price'] =
+                    (float) ($specialPrice > 0 ? $specialPrice : $price);
+
+                $rowNum++;
+            }
+        }
+
+        return $this;
+    }
+
+    protected function _configurableFieldConfig()
+    {
+        $fieldConfig = $this->_getMapper()->getFieldConfig();
+        $fieldConfigAdd = $this->_getMapper()->getFieldConfig(null, null, self::IMPORT_CONFIG_CB_FIELDMAP);
+
+        foreach ($fieldConfig as $store => &$config) {
+            if (! isset($fieldConfigAdd[$store])) {
+                continue;
+            }
+
+            $config = $fieldConfigAdd[$store] + $config;
+        }
+        $fieldConfig['admin']['sku'] = $this->_getConfigNode(self::IMPORT_CONFIG_CB_SKU);
+
+        return $fieldConfig;
+    }
+
+    protected function _configurableGetConfigurables(Ho_Import_Model_Import_Transport $transport)
+    {
+        if (! $this->_getConfigNode(self::IMPORT_CONFIG_CB)) {
+            return $this;
+        }
+        $calculatePrice = (bool) $this->_getConfigNode(self::IMPORT_CONFIG_CB_CALCULATE_PRICE);
+        $fieldConfig = $this->_configurableFieldConfig();
+        $fieldConfig['admin']['_super_products_sku'] = [];
+        $fieldConfig['admin']['_super_attribute_code'] = [];
+        $fieldConfig['admin']['_super_attribute_option'] = [];
+        $fieldConfig['admin']['_super_attribute_price_corr'] = [];
+
+        foreach ($this->_configurables as $configurable) {
+            // Recalculate price.
+            if ($calculatePrice) {
+                //No simple products are in stock, we need to calculate the price based on all the products instead of only the products in stock.
+                $noInStockPrice = $configurable['admin'][0]['_instock_price'] == PHP_INT_MAX;
+                $priceKey =        $noInStockPrice ? '_allprod_price'         : '_instock_price';
+                $specialPriceKey = $noInStockPrice ? '_allprod_special_price' : '_instock_special_price';
+
+                //Check if special_price on the configurable is smaller than the price, if so, use the special price for calculation of the price_corr
+                $hasSpecialPrice = $configurable['admin'][0][$specialPriceKey] < $configurable['admin'][0][$priceKey];
+                $finalPriceKey = $hasSpecialPrice ? $specialPriceKey : $priceKey;
+
+                $minPrice = $configurable['admin'][0][$finalPriceKey];
+                $configurable['admin'][0]['price'] = $configurable['admin'][0][$priceKey];
+                $configurable['admin'][0]['special_price'] =
+                    $configurable['admin'][0][$specialPriceKey] != PHP_INT_MAX && $configurable['admin'][0][$specialPriceKey] > 0
+                        ? $configurable['admin'][0][$specialPriceKey]
+                        : $this->_fastSimpleImport->getSymbolEmptyFields();
+
+                foreach ($configurable['admin'] as &$row) {
+                    if (! isset($row['_super_attribute_final_price'])) {
+                        continue;
+                    }
+
+                    $row['_super_attribute_price_corr'] = ($row['_super_attribute_final_price']) - $minPrice;
+                }
+            }
+
+            $items = $this->_fieldMapItemFlatten($configurable, $fieldConfig);
+            foreach ($items as $item) {
+                $transport->addItem($item);
+            }
+        }
+
+        return $this;
     }
 }

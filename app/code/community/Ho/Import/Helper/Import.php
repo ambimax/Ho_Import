@@ -170,7 +170,8 @@ class Ho_Import_Helper_Import extends Mage_Core_Helper_Abstract
     public function truncate($line, $field, $length = 80, $etc = '…', $breakWords = true)
     {
         $string = $this->_getMapper()->mapItem($field);
-        return Mage::helper('core/string')->truncate($string, $length, $etc, $remainder = '', $breakWords);
+        $remainder = '';
+        return Mage::helper('core/string')->truncate($string, $length, $etc, $remainder, $breakWords);
     }
 
 
@@ -241,7 +242,24 @@ class Ho_Import_Helper_Import extends Mage_Core_Helper_Abstract
             return null;
         }
 
-        return implode($glue, $result);
+        return implode($glue, array_filter($result));
+    }
+
+
+    /**
+     * @param $line
+     */
+    public function getFieldFallback($line)
+    {
+        $fields = func_get_args();
+        array_shift($fields);
+
+        $values = $this->getFieldMultiple($line, $fields);
+        foreach ($values as $value) {
+            if ($value) {
+                return $value;
+            }
+        }
     }
 
 
@@ -374,12 +392,38 @@ class Ho_Import_Helper_Import extends Mage_Core_Helper_Abstract
             foreach ($mapping as $map) {
                 $from = html_entity_decode($map['@']['from']);
                 if ($from == $value) {
-                    $values[$key] = htmlspecialchars_decode($map['@']['to']);
+                    $values[$key] = html_entity_decode($map['@']['to']);
                 }
             }
         }
 
         return $values;
+    }
+
+
+    /** @var Ho_Import_Model_Template_Filter */
+    protected $_filter;
+
+
+    /**
+     * @param $line
+     * @param $template
+     *
+     * @return string
+     * @throws Exception
+     */
+    public function templateEngine($line, $template)
+    {
+        if ($this->_filter === null) {
+            $this->_filter = Mage::getModel('ho_import/template_filter');
+            $this->_filter->setMapper($this->_getMapper());
+            $this->_filter->setVariables(['helper' => $this]);
+        }
+
+        $template = trim($template, "\n ");
+        $this->_filter->setLine($line);
+        $result = $this->_filter->filter($template);
+        return $result;
     }
 
 
@@ -397,8 +441,8 @@ class Ho_Import_Helper_Import extends Mage_Core_Helper_Abstract
         $count = count($this->_getMapper()->mapItem($countConfig));
         $value = $this->_getMapper()->mapItem($valueConfig);
         $values = array();
-        for ($i = 1; $i <= $count; $i++) {
-            $values[] = is_null($value) ? $i : $value;
+        for ($i = 0; $i < $count; $i++) {
+            $values[] = is_null($value) ? $i + 1 : (is_array($value) ? $value[$i] : $value);
         }
         return $values;
     }
@@ -519,7 +563,8 @@ class Ho_Import_Helper_Import extends Mage_Core_Helper_Abstract
         }
 
         foreach ($values as $key => $value) {
-            $datetime = new DateTime('@'.$value, $timezoneFrom);
+            $value = $value ?  '@'.$value : 'now';
+            $datetime = new DateTime($value, $timezoneFrom);
             $datetime->setTimezone(new DateTimeZone(date_default_timezone_get()));
 
             if ($offset) {
@@ -545,6 +590,8 @@ class Ho_Import_Helper_Import extends Mage_Core_Helper_Abstract
 
     /**
      * Download given file to ImportExport Tmp Dir (usually media/import)
+     * Files can be downloaded through FTP by passing the FTP credentials in the url:
+     * ftp://username:password@hostname
      * @param string $url
      */
     protected $_fileCache = array();
@@ -555,6 +602,7 @@ class Ho_Import_Helper_Import extends Mage_Core_Helper_Abstract
         }
 
         try {
+            $parsedUrl = parse_url($url);
             $this->_fileCache[$url] = true;
             $dir = $this->_getUploader()->getTmpDir();
             if (!is_dir($dir)) {
@@ -563,7 +611,45 @@ class Ho_Import_Helper_Import extends Mage_Core_Helper_Abstract
 
             $fileName = $dir . DS . (! is_null($filename) ? $filename : basename($url));
             $fileHandle = fopen($fileName, 'w+');
-            $ch = curl_init($url);
+            $ch = curl_init();
+            /* todo reuse curl handle to increase performance
+             * http://stackoverflow.com/questions/3787002/reusing-the-same-curl-handle-big-performance-increase
+             * $this->_curlHandles = []
+             * $this->_curlHandles[{url_without_file}] = {curlHandle}
+             * if (isset($this->_curlHandles[{url_without_file}]) use curl handle
+             * else create new curl handle
+             */
+
+            $statusOk = -1;
+            if (! isset($parsedUrl['path'])) {
+                Mage::throwException('No Path detected for URL');
+            }
+
+            if (! isset($parsedUrl['scheme'])) {
+                Mage::throwException('No URL scheme detected ftp://, http://, etc.');
+            }
+
+            switch ($parsedUrl['scheme']) {
+                case 'ftp':
+                    $statusOk = 226;
+                    if (!isset($parsedUrl['user'], $parsedUrl['pass'])) {
+                        Mage::helper('ho_import/log')->log($this->__(
+                                'Invalid URL scheme detected, please enter FTP credentials'), Zend_Log::ERR);
+                    }
+                    $url = $parsedUrl['scheme'] . '://' . $parsedUrl['host'] . $parsedUrl['path'];
+                    curl_setopt($ch, CURLOPT_USERPWD, $parsedUrl['user'] . ':' . $parsedUrl['pass']);
+                    curl_setopt($ch, CURLOPT_URL, $url);
+                    break;
+                case 'http':
+                case 'https':
+                    $statusOk = 200;
+                    curl_setopt($ch, CURLOPT_URL, $url);
+                    break;
+                default:
+                    Mage::helper('ho_import/log')->log($this->__(
+                        $this->__('Invalid URL scheme detected')), Zend_Log::ERR);
+            }
+
             curl_setopt($ch, CURLOPT_TIMEOUT, 10);
             curl_setopt($ch, CURLOPT_FILE, $fileHandle);
             curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
@@ -573,7 +659,7 @@ class Ho_Import_Helper_Import extends Mage_Core_Helper_Abstract
             curl_close($ch);
             fclose($fileHandle);
 
-            if ($code !== 200) {
+            if ($code !== $statusOk) {
                 $this->_fileCache[$url] = $code;
                 Mage::helper('ho_import/log')->log($this->__(
                         "Returned status code %s while downloading image %s", $code, $url), Zend_Log::ERR);
@@ -609,5 +695,23 @@ class Ho_Import_Helper_Import extends Mage_Core_Helper_Abstract
             }
         }
         return $this->_fileUploader;
+    }
+
+
+    /**
+     * @param $line
+     * @param array $key Key to search
+     * @param array $sourceModel Source model to search key in
+     * @return bool|string
+     */
+    public function getOptionValue($line, $key, $sourceModel)
+    {
+        $key = $this->_getMapper()->mapItem($key);
+        $sourceModel = $this->_getMapper()->mapItem($sourceModel);
+
+        /** @var Mage_Eav_Model_Entity_Attribute_Source_Abstract $sourceModel */
+        $sourceModel = Mage::getSingleton($sourceModel);
+
+        return $sourceModel->getOptionText($key);
     }
 }
